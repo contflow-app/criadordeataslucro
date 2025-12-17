@@ -520,7 +520,7 @@ def process_one(
 # =========================
 # UI
 # =========================
-st.set_page_config(page_title="Criador de Atas", layout="wide")
+st.set_page_config(page_title="IA para geração de Documentos", layout="wide")
 st.title("Criador de Atas — Lei 15270/25")
 st.markdown(
     """
