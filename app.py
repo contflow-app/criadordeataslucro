@@ -363,7 +363,6 @@ def fill_template_docx(template_path: str, ext: Extracao, ata_date: date, ata_ti
         "ANO": ano,
         "HORA": ata_time,
         "PRESIDENTE": DEFAULT_PRESIDENTE,
-        "SECRETARIO": DEFAULT_SECRETARIO,
     }
 
     for p in doc.paragraphs:
