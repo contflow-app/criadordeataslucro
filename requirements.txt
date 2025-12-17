@@ -1,7 +1,0 @@
-streamlit
-pdfplumber
-openpyxl
-python-docx
-pytesseract
-pdf2image
-Pillow
