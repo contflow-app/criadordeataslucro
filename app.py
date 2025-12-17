@@ -521,7 +521,19 @@ def process_one(
 # UI
 # =========================
 st.set_page_config(page_title="Criador de Atas", layout="wide")
-st.title("Criador de Atas — Template Melhorado (placeholders)")
+st.title("Criador de Atas — Lei 15270/25")
+st.markdown(
+    """
+    <div style="text-align:center; margin-bottom:20px;">
+        <h1>Criador de Atas</h1>
+        <div style="color:#777; font-size:0.9em;">
+            Desenvolvido por <strong>Raul Martins</strong>
+        </div>
+    </div>
+    <hr/>
+    """,
+    unsafe_allow_html=True
+)
 
 with st.sidebar:
     st.subheader("Template")
