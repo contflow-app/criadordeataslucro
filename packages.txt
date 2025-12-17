@@ -1,4 +1,0 @@
-libreoffice
-tesseract-ocr
-tesseract-ocr-por
-poppler-utils
