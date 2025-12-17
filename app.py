@@ -38,7 +38,7 @@ except Exception:
 # Constantes
 # =========================
 DEFAULT_PRESIDENTE = "STANLEY DE SOUZA MOREIRA"
-DEFAULT_ADVOGADO = "MARCO AURÉLIO POFFO"
+DEFAULT_SECRETARIO = "MARCO AURÉLIO POFFO"  # advogado como secretário, conforme pedido
 
 PT_MONTHS = {
     1: "janeiro", 2: "fevereiro", 3: "março", 4: "abril", 5: "maio", 6: "junho",
@@ -107,8 +107,14 @@ def normalize_spaces(s: str) -> str:
     return s.strip()
 
 def city_uf_from_text(text: str) -> str:
-    m = re.search(r"\b([A-ZÁÂÃÉÊÍÓÔÕÚÇ][A-Za-zÁÂÃÉÊÍÓÔÕÚÇ\s]{2,})\s*[/-]\s*([A-Z]{2})\b", text or "")
-    return f"{normalize_spaces(m.group(1))}/{m.group(2)}" if m else ""
+    t = text or ""
+    m = re.search(r"\b([A-ZÁÂÃÉÊÍÓÔÕÚÇ][A-Za-zÁÂÃÉÊÍÓÔÕÚÇ\s]{2,})\s*/\s*([A-Z]{2})\b", t)
+    if m:
+        return f"{normalize_spaces(m.group(1))}/{m.group(2)}"
+    m = re.search(r"\b([A-ZÁÂÃÉÊÍÓÔÕÚÇ][A-Za-zÁÂÃÉÊÍÓÔÕÚÇ\s]{2,})\s*-\s*([A-Z]{2})\b", t)
+    if m:
+        return f"{normalize_spaces(m.group(1))}/{m.group(2)}"
+    return ""
 
 def extract_endereco(text: str) -> Tuple[str, str]:
     for pat in ENDERECO_PATTERNS:
@@ -119,25 +125,42 @@ def extract_endereco(text: str) -> Tuple[str, str]:
     return "", ""
 
 def extract_socios(text: str) -> List[Socio]:
-    socios, seen = [], set()
-    lines = [normalize_spaces(l) for l in (text or "").splitlines() if normalize_spaces(l)]
+    """
+    1) assinatura: linha nome + linha CPF
+    2) inline CPF
+    3) fallback CPFs
+    """
+    t = text or ""
+    lines = [normalize_spaces(l) for l in t.splitlines() if normalize_spaces(l)]
+    socios: List[Socio] = []
+    seen = set()
 
     for i in range(1, len(lines)):
         if "CPF" in lines[i].upper():
             m = CPF_RE.search(lines[i])
-            if m:
-                cpf = m.group(0)
-                nome = lines[i-1]
-                if cpf not in seen:
-                    socios.append(Socio(nome, cpf))
-                    seen.add(cpf)
+            if not m:
+                continue
+            cpf = m.group(0)
+            nome = lines[i - 1]
+            if cpf not in seen:
+                socios.append(Socio(nome=nome, cpf=cpf))
+                seen.add(cpf)
 
     if not socios:
-        for m in CPF_RE.finditer(text or ""):
+        for m in re.finditer(r"([A-ZÁÂÃÉÊÍÓÔÕÚÇ][A-ZÁÂÃÉÊÍÓÔÕÚÇ\s]{4,120}).{0,120}?\bCPF\b.{0,40}?("+CPF_RE.pattern+r")", t):
+            nome = normalize_spaces(m.group(1))
+            cpf = m.group(2)
+            if cpf not in seen:
+                socios.append(Socio(nome=nome, cpf=cpf))
+                seen.add(cpf)
+
+    if not socios:
+        for m in CPF_RE.finditer(t):
             cpf = m.group(0)
             if cpf not in seen:
-                socios.append(Socio("", cpf))
+                socios.append(Socio(nome="", cpf=cpf))
                 seen.add(cpf)
+
     return socios
 
 def regex_extract(text: str) -> Extracao:
@@ -146,22 +169,41 @@ def regex_extract(text: str) -> Extracao:
     nire = NIRE_RE.search(text).group(1) if NIRE_RE.search(text) else ""
     endereco, cidade_uf = extract_endereco(text)
     socios = extract_socios(text)
-    return Extracao(razao, cnpj, nire, endereco, cidade_uf, socios)
+    return Extracao(razao_social=razao, cnpj=cnpj, nire=nire, endereco=endereco, cidade_uf=cidade_uf, socios=socios)
 
-def extract_text_from_pdf(bts: bytes) -> Tuple[str, bool]:
+def extract_text_from_pdf(bts: bytes, min_chars: int = 250) -> Tuple[str, bool]:
     native = ""
     try:
+        parts = []
         with pdfplumber.open(io.BytesIO(bts)) as pdf:
-            native = "\n".join(p.extract_text() or "" for p in pdf.pages)
+            for page in pdf.pages:
+                t = (page.extract_text() or "").strip()
+                if t:
+                    parts.append(t)
+        native = "\n".join(parts).strip()
     except Exception:
-        pass
-    if len(native) > 200:
+        native = ""
+
+    if len(native) >= min_chars:
         return native, False
-    if OCR_OK:
+
+    if not OCR_OK:
+        return native, False
+
+    try:
         images = convert_from_bytes(bts, dpi=250)
-        ocr = "\n".join(pytesseract.image_to_string(i, lang="por") for i in images)
-        return (ocr if len(ocr) > len(native) else native), True
-    return native, False
+        ocr_parts = []
+        for img in images:
+            txt = pytesseract.image_to_string(img, lang="por", config="--oem 3 --psm 6")
+            txt = (txt or "").strip()
+            if txt:
+                ocr_parts.append(txt)
+        ocr_text = "\n".join(ocr_parts).strip()
+        if len(ocr_text) > len(native):
+            return ocr_text, True
+        return native, False
+    except Exception:
+        return native, False
 
 def extract_text_from_docx(bts: bytes) -> str:
     doc = Document(io.BytesIO(bts))
@@ -169,12 +211,20 @@ def extract_text_from_docx(bts: bytes) -> str:
 
 
 # =========================
-# GPT
+# GPT (Structured Outputs)
 # =========================
 def gpt_extract(text: str) -> Optional[Extracao]:
-    client = OpenAI(api_key=st.secrets.get("OPENAI_API_KEY"))
+    api_key = st.secrets.get("OPENAI_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY ausente em Secrets.")
+    if not OPENAI_OK:
+        raise RuntimeError("Biblioteca openai não instalada (requirements.txt).")
+
+    client = OpenAI(api_key=api_key)
+
     schema = {
         "type": "object",
+        "additionalProperties": False,
         "properties": {
             "razao_social": {"type": "string"},
             "cnpj": {"type": "string"},
@@ -185,49 +235,145 @@ def gpt_extract(text: str) -> Optional[Extracao]:
                 "type": "array",
                 "items": {
                     "type": "object",
-                    "properties": {"nome": {"type": "string"}, "cpf": {"type": "string"}},
-                    "required": ["nome", "cpf"]
+                    "additionalProperties": False,
+                    "properties": {
+                        "nome": {"type": "string"},
+                        "cpf": {"type": "string"},
+                    },
+                    "required": ["nome", "cpf"],
                 }
             }
         },
         "required": ["razao_social", "cnpj", "nire", "endereco", "cidade_uf", "socios"]
     }
 
+    prompt = f"""
+Extraia dados societários do texto abaixo e retorne APENAS JSON no schema.
+Regras:
+- Não invente dados.
+- Liste TODOS os sócios com NOME e CPF quando disponíveis. Se CPF não aparecer, cpf="".
+- Não confunda NIRE com CPF.
+- cidade_uf apenas se explícito.
+- Se algo não estiver no texto, retorne "".
+
+TEXTO:
+\"\"\"{text[:120000]}\"\"\"
+"""
+
     resp = client.responses.create(
         model="gpt-4o-mini",
-        input=text[:120000],
+        input=[{"role": "user", "content": prompt}],
         text={
             "format": {
                 "type": "json_schema",
                 "name": "extract_societario",
                 "strict": True,
-                "schema": schema
+                "schema": schema,
             }
         }
     )
+
+    raw = getattr(resp, "output_text", "") or ""
     import json
-    data = json.loads(resp.output_text)
-    socios = [Socio(s["nome"], s["cpf"]) for s in data["socios"]]
+    data = json.loads(raw)
+
+    socios = [Socio(nome=s.get("nome", ""), cpf=s.get("cpf", "")) for s in (data.get("socios") or [])]
     return Extracao(
-        data["razao_social"], data["cnpj"], data["nire"],
-        data["endereco"], data["cidade_uf"], socios
+        razao_social=data.get("razao_social", ""),
+        cnpj=data.get("cnpj", ""),
+        nire=data.get("nire", ""),
+        endereco=data.get("endereco", ""),
+        cidade_uf=data.get("cidade_uf", ""),
+        socios=socios,
     )
 
 
 # =========================
-# DOCX
+# DOCX helpers (placeholders)
 # =========================
+def replace_placeholders_in_paragraph(paragraph, mapping: dict) -> None:
+    """
+    Substitui placeholders em runs, preservando formatação, mas com uma limitação:
+    placeholders não devem estar "quebrados" em múltiplos runs.
+    (No template melhorado, isso é controlável.)
+    """
+    for run in paragraph.runs:
+        text = run.text
+        if not text:
+            continue
+        changed = False
+        for k, v in mapping.items():
+            token = "{{" + k + "}}"
+            if token in text:
+                text = text.replace(token, v)
+                changed = True
+        if changed:
+            run.text = text
+
+def set_multiline_placeholder(paragraph, token_name: str, lines: List[str]) -> None:
+    """
+    Substitui um parágrafo que contém {{TOKEN}} por múltiplas linhas
+    (com quebras de linha dentro do mesmo parágrafo).
+    """
+    token = "{{" + token_name + "}}"
+    if token not in paragraph.text:
+        return
+
+    # limpa runs e recria com breaks
+    paragraph.clear()
+    if not lines:
+        paragraph.add_run("________________________")
+        return
+
+    for i, line in enumerate(lines):
+        r = paragraph.add_run(line)
+        if i < len(lines) - 1:
+            r.add_break()
+
 def fill_template_docx(template_path: str, ext: Extracao, ata_date: date, ata_time: str) -> bytes:
     doc = Document(template_path)
-    dia, mes, ano = str(ata_date.day), PT_MONTHS[ata_date.month], str(ata_date.year)
+
+    dia = str(ata_date.day)
+    mes = PT_MONTHS[ata_date.month]
+    ano = str(ata_date.year)
+
+    # monta listas
+    socios_presenca_lines = []
+    for idx, s in enumerate(ext.socios or [], start=1):
+        nome = (s.nome or "").strip() or "________________________"
+        socios_presenca_lines.append(f"{idx}. {nome}")
+
+    socios_assinaturas_lines = []
+    for s in (ext.socios or []):
+        nome = (s.nome or "").strip() or "________________________"
+        cpf = (s.cpf or "").strip()
+        socios_assinaturas_lines.append("_______________________________________")
+        socios_assinaturas_lines.append(nome)
+        if cpf:
+            socios_assinaturas_lines.append(f"CPF nº {cpf}")
+        socios_assinaturas_lines.append("")  # linha em branco entre sócios
+
+    mapping = {
+        "RAZAO_SOCIAL": ext.razao_social or "________________________",
+        "CNPJ": ext.cnpj or "____________________",
+        "NIRE": ext.nire or "____________",
+        "ENDERECO": ext.endereco or "__________________________________________",
+        "CIDADE_UF": ext.cidade_uf or "________________",
+        "DIA": dia,
+        "MES": mes,
+        "ANO": ano,
+        "HORA": ata_time,
+        "PRESIDENTE": DEFAULT_PRESIDENTE,
+        "SECRETARIO": DEFAULT_SECRETARIO,
+    }
 
     for p in doc.paragraphs:
-        if p.text.strip().startswith("Aos dias"):
-            p.text = re.sub(
-                r"Aos\s+dias.+?,",
-                f"Aos dias {dia} do mês de {mes} do ano de {ano}, às {ata_time} horas,",
-                p.text
-            )
+        # placeholders simples
+        replace_placeholders_in_paragraph(p, mapping)
+
+        # placeholders multi-linha
+        set_multiline_placeholder(p, "SOCIOS_PRESENCA", socios_presenca_lines)
+        set_multiline_placeholder(p, "SOCIOS_ASSINATURAS", socios_assinaturas_lines)
 
     out = io.BytesIO()
     doc.save(out)
@@ -235,51 +381,261 @@ def fill_template_docx(template_path: str, ext: Extracao, ata_date: date, ata_ti
 
 
 # =========================
-# PROCESSAMENTO
+# PDF export (opcional)
 # =========================
-def process_one(name, bts, template_path, ata_date, ata_time, use_gpt):
-    start = time.time()
-    ocr = False
+def docx_to_pdf_via_libreoffice(docx_bytes: bytes) -> Optional[bytes]:
+    with tempfile.TemporaryDirectory() as tmp:
+        docx_path = os.path.join(tmp, "ata.docx")
+        with open(docx_path, "wb") as f:
+            f.write(docx_bytes)
 
-    if name.lower().endswith(".pdf"):
-        text, ocr = extract_text_from_pdf(bts)
-    else:
-        text = extract_text_from_docx(bts)
+        cmd = ["soffice", "--headless", "--convert-to", "pdf", "--outdir", tmp, docx_path]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True)
+            pdf_path = os.path.join(tmp, "ata.pdf")
+            if not os.path.exists(pdf_path):
+                return None
+            with open(pdf_path, "rb") as f:
+                return f.read()
+        except Exception:
+            return None
 
-    ext = gpt_extract(text) if use_gpt else regex_extract(text)
-    docx = fill_template_docx(template_path, ext, ata_date, ata_time)
 
-    return Resultado(
-        name, "OK", "Gerado", "gpt" if use_gpt else "regex", ocr,
-        ext.razao_social, ext.cnpj, ext.nire, ext.cidade_uf,
-        len(ext.socios), int((time.time()-start)*1000), docx, None
-    )
+# =========================
+# Excel report
+# =========================
+def make_report_xlsx(rows: List[Resultado]) -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Relatório"
+    headers = [
+        "arquivo_origem","status","mensagem","ocr_usado","metodo",
+        "razao_social","cnpj","nire","cidade_uf","qtd_socios",
+        "docx_gerado","pdf_gerado","tempo_ms"
+    ]
+    ws.append(headers)
+    for r in rows:
+        ws.append([
+            r.arquivo_origem, r.status, r.mensagem,
+            "sim" if r.ocr_usado else "não",
+            r.metodo,
+            r.razao_social, r.cnpj, r.nire, r.cidade_uf, r.qtd_socios,
+            "sim" if r.docx_bytes else "não",
+            "sim" if r.pdf_bytes else "não",
+            r.tempo_ms
+        ])
+    for col in range(1, len(headers) + 1):
+        ws.column_dimensions[get_column_letter(col)].width = 22
+    bio = io.BytesIO()
+    wb.save(bio)
+    bio.seek(0)
+    return bio.getvalue()
+
+
+def load_batch_files(uploaded_files, uploaded_zip) -> List[Tuple[str, bytes]]:
+    files: List[Tuple[str, bytes]] = []
+    if uploaded_files:
+        for f in uploaded_files:
+            files.append((f.name, f.read()))
+    if uploaded_zip:
+        zbytes = uploaded_zip.read()
+        with zipfile.ZipFile(io.BytesIO(zbytes)) as z:
+            for name in z.namelist():
+                if name.endswith("/"):
+                    continue
+                if name.lower().endswith((".pdf", ".docx")):
+                    files.append((Path(name).name, z.read(name)))
+    return files
+
+
+# =========================
+# Processamento
+# =========================
+def process_one(
+    name: str,
+    bts: bytes,
+    template_path: str,
+    ata_date: date,
+    ata_time: str,
+    try_pdf: bool,
+    use_gpt: bool
+) -> Resultado:
+    t0 = time.time()
+    ocr_used = False
+    metodo = "regex"
+    try:
+        if name.lower().endswith(".pdf"):
+            text, ocr_used = extract_text_from_pdf(bts)
+        elif name.lower().endswith(".docx"):
+            text = extract_text_from_docx(bts)
+        else:
+            return Resultado(name, "ERRO", "Formato não suportado (use PDF/DOCX).", "n/a", False, "", "", "", "", 0, int((time.time()-t0)*1000))
+
+        if not text.strip():
+            return Resultado(name, "ERRO", "Texto vazio (OCR falhou/indisponível).", "n/a", ocr_used, "", "", "", "", 0, int((time.time()-t0)*1000))
+
+        if use_gpt:
+            ext = gpt_extract(text)
+            metodo = "gpt"
+        else:
+            ext = regex_extract(text)
+
+        issues = []
+        if not ext.razao_social:
+            issues.append("Razão social ausente")
+        if not ext.cnpj:
+            issues.append("CNPJ ausente")
+        if not (ext.socios and any((s.nome or "").strip() for s in ext.socios)):
+            issues.append("Nomes de sócios ausentes")
+
+        status = "OK" if not issues else "PENDENTE"
+        msg = "Gerado" if status == "OK" else "; ".join(issues)
+        if ocr_used:
+            msg += " (OCR aplicado)"
+        if use_gpt:
+            msg += " (GPT)"
+
+        docx_bytes = fill_template_docx(template_path, ext, ata_date, ata_time)
+        pdf_bytes = docx_to_pdf_via_libreoffice(docx_bytes) if try_pdf else None
+
+        return Resultado(
+            arquivo_origem=name,
+            status=status,
+            mensagem=msg,
+            metodo=metodo,
+            ocr_usado=ocr_used,
+            razao_social=ext.razao_social,
+            cnpj=ext.cnpj,
+            nire=ext.nire,
+            cidade_uf=ext.cidade_uf,
+            qtd_socios=len(ext.socios or []),
+            tempo_ms=int((time.time()-t0)*1000),
+            docx_bytes=docx_bytes,
+            pdf_bytes=pdf_bytes
+        )
+    except Exception as e:
+        return Resultado(name, "ERRO", f"{type(e).__name__}: {e}", metodo, ocr_used, "", "", "", "", 0, int((time.time()-t0)*1000))
 
 
 # =========================
 # UI
 # =========================
-st.set_page_config(layout="wide")
-st.title("Criador de Atas")
+st.set_page_config(page_title="Criador de Atas", layout="wide")
+st.title("Criador de Atas — Template Melhorado (placeholders)")
 
 with st.sidebar:
-    template_path = st.text_input("Template", "templates/TEMPLATE_ATA.docx")
-    ata_date = st.date_input("Data da ATA", datetime.now().date())
-    use_gpt = st.checkbox("Usar GPT")
+    st.subheader("Template")
+    template_path = st.text_input("Caminho do template", value="templates/TEMPLATE_ATA_MELHORADO.docx")
+    try_pdf = st.checkbox("Gerar PDF (requer LibreOffice)", value=False)
+
+    st.subheader("Data da ATA")
+    ata_date = st.date_input("Data (padrão = hoje)", value=datetime.now().date())
+
+    st.subheader("Extração")
+    use_gpt = st.checkbox("Usar GPT para melhorar extração", value=False)
+    if use_gpt:
+        if not OPENAI_OK:
+            st.error("Biblioteca openai não instalada (requirements.txt).")
+        elif not st.secrets.get("OPENAI_API_KEY", ""):
+            st.warning("Falta OPENAI_API_KEY em Secrets do Streamlit Cloud.")
 
 tab1, tab2 = st.tabs(["Individual", "Lote"])
 
 with tab1:
-    up = st.file_uploader("Contrato", type=["pdf", "docx"])
+    st.subheader("Individual")
+    up = st.file_uploader("Suba 1 contrato (PDF ou DOCX)", type=["pdf", "docx"])
     if up:
-        ata_time = datetime.now().strftime("%H:%M")
-        r = process_one(up.name, up.read(), template_path, ata_date, ata_time, use_gpt)
-        st.download_button("Baixar ATA", r.docx_bytes, file_name="ATA.docx")
+        single_time = datetime.now().strftime("%H:%M")
+        r = process_one(up.name, up.read(), template_path, ata_date, single_time, try_pdf, use_gpt)
+
+        st.write(f"**Status:** {r.status} | **Método:** {r.metodo}")
+        st.write(f"**Mensagem:** {r.mensagem}")
+        st.write(f"**Sócios encontrados:** {r.qtd_socios}")
+        st.caption(f"Carimbo: {ata_date.strftime('%d/%m/%Y')} {single_time}")
+
+        base = Path(up.name).stem
+        if r.docx_bytes:
+            st.download_button(
+                "Baixar ATA (DOCX)",
+                data=r.docx_bytes,
+                file_name=f"ATA_{base}.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            )
+        if r.pdf_bytes:
+            st.download_button(
+                "Baixar ATA (PDF)",
+                data=r.pdf_bytes,
+                file_name=f"ATA_{base}.pdf",
+                mime="application/pdf"
+            )
 
 with tab2:
-    ups = st.file_uploader("Contratos", type=["pdf", "docx"], accept_multiple_files=True)
-    if st.button("Processar lote") and ups:
+    st.subheader("Lote")
+    uploaded_files = st.file_uploader("Vários arquivos (PDF/DOCX)", type=["pdf", "docx"], accept_multiple_files=True)
+    uploaded_zip = st.file_uploader("Ou ZIP com PDFs/DOCXs", type=["zip"])
+    batch = load_batch_files(uploaded_files, uploaded_zip)
+    st.write(f"Arquivos carregados: **{len(batch)}**")
+
+    continue_on_error = st.checkbox("Continuar mesmo se houver erro", value=True)
+    include_excel_inside_zip = st.checkbox("Incluir Excel dentro do ZIP", value=True)
+
+    if st.button("Processar lote", disabled=(len(batch) == 0)):
+        # trava carimbo no início do lote
+        batch_date = ata_date
         batch_time = datetime.now().strftime("%H:%M")
-        for u in ups:
-            r = process_one(u.name, u.read(), template_path, ata_date, batch_time, use_gpt)
-            st.download_button(f"ATA {u.name}", r.docx_bytes, file_name=f"ATA_{u.name}.docx")
+        st.info(f"Carimbo do lote: {batch_date.strftime('%d/%m/%Y')} {batch_time}")
+
+        rows: List[Resultado] = []
+        prog = st.progress(0.0)
+        box = st.empty()
+
+        for i, (name, bts) in enumerate(batch, start=1):
+            box.write(f"Processando {i}/{len(batch)}: **{name}**")
+            r = process_one(name, bts, template_path, batch_date, batch_time, try_pdf, use_gpt)
+            rows.append(r)
+            prog.progress(i / len(batch))
+            if (not continue_on_error) and r.status == "ERRO":
+                st.error(f"Parado no erro: {name} — {r.mensagem}")
+                break
+
+        excel_bytes = make_report_xlsx(rows)
+
+        zip_out = io.BytesIO()
+        with zipfile.ZipFile(zip_out, "w", zipfile.ZIP_DEFLATED) as z:
+            for r in rows:
+                base = Path(r.arquivo_origem).stem
+                if r.docx_bytes:
+                    z.writestr(f"ATAs/{base}.docx", r.docx_bytes)
+                if r.pdf_bytes:
+                    z.writestr(f"ATAs/{base}.pdf", r.pdf_bytes)
+            if include_excel_inside_zip:
+                z.writestr("relatorio_processamento.xlsx", excel_bytes)
+
+        zip_out.seek(0)
+
+        ok = sum(1 for r in rows if r.status == "OK")
+        pend = sum(1 for r in rows if r.status == "PENDENTE")
+        err = sum(1 for r in rows if r.status == "ERRO")
+        st.success(f"Concluído. OK: {ok} | PENDENTE: {pend} | ERRO: {err}")
+
+        st.download_button(
+            "Baixar Relatório (Excel)",
+            data=excel_bytes,
+            file_name="relatorio_processamento.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        st.download_button(
+            "Baixar ZIP (ATAs + Excel opcional)",
+            data=zip_out.getvalue(),
+            file_name="atas_geradas.zip",
+            mime="application/zip",
+        )
+
+        st.dataframe([{
+            "arquivo": r.arquivo_origem,
+            "status": r.status,
+            "metodo": r.metodo,
+            "ocr": "sim" if r.ocr_usado else "não",
+            "socios": r.qtd_socios,
+            "mensagem": r.mensagem
+        } for r in rows])
