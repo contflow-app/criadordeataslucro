@@ -38,7 +38,6 @@ except Exception:
 # Constantes
 # =========================
 DEFAULT_PRESIDENTE = "STANLEY DE SOUZA MOREIRA"
-DEFAULT_SECRETARIO = "MARCO AURÉLIO POFFO"  # advogado como secretário, conforme pedido
 
 PT_MONTHS = {
     1: "janeiro", 2: "fevereiro", 3: "março", 4: "abril", 5: "maio", 6: "junho",
